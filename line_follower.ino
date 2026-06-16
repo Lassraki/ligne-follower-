@@ -1,0 +1,128 @@
+#include <Arduino.h>
+
+#define NUM_SENSORS 8
+#define SENSOR_PINS {34, 35, 32, 33, 36, 39, 37, 38}
+#define THRESHOLD 500
+#define MAX_PWM 255
+#define BASE_SPEED_FAST 190
+#define BASE_SPEED_SLOW 110
+#define ERROR_SLOW_THRESHOLD 1.8
+
+#define KP1 1.8
+#define KI1 0.03
+#define KD1 0.9
+#define KP2 2.5
+#define KI2 0.06
+#define KD2 1.4
+#define KP3 3.5
+#define KI3 0.10
+#define KD3 2.2
+
+#define INTEGRAL_LIMIT 120
+#define LOOP_TIME_MS 10
+
+const int sensorPins[NUM_SENSORS] = SENSOR_PINS;
+int sensorValues[NUM_SENSORS];
+int lastError = 0;
+long integral = 0;
+unsigned long lastTime = 0;
+
+void setup() {
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    pinMode(sensorPins[i], INPUT);
+  }
+  pinMode(25, OUTPUT);
+  pinMode(26, OUTPUT);
+  pinMode(27, OUTPUT);
+  pinMode(14, OUTPUT);
+  pinMode(12, OUTPUT);
+  pinMode(13, OUTPUT);
+  pinMode(15, OUTPUT);
+  digitalWrite(15, HIGH);
+  ledcSetup(0, 20000, 8);
+  ledcSetup(1, 20000, 8);
+  ledcAttachPin(25, 0);
+  ledcAttachPin(14, 1);
+  lastTime = millis();
+}
+
+void readSensors() {
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    sensorValues[i] = (analogRead(sensorPins[i]) < THRESHOLD) ? 1 : 0;
+  }
+}
+
+float computePosition() {
+  long weightedSum = 0;
+  int total = 0;
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    if (sensorValues[i]) {
+      weightedSum += (long)(i - (NUM_SENSORS - 1) / 2.0) * 1000;
+      total++;
+    }
+  }
+  if (total == 0) return lastError;
+  return (float)weightedSum / total / 1000.0;
+}
+
+float computePID(float error, float KP, float KI, float KD) {
+  integral += (long)error;
+  integral = constrain(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT);
+  int derivative = (int)(error - lastError);
+  lastError = (int)error;
+  return KP * error + KI * integral + KD * derivative;
+}
+
+void setMotors(int left, int right) {
+  left = constrain(left, -MAX_PWM, MAX_PWM);
+  right = constrain(right, -MAX_PWM, MAX_PWM);
+  if (left >= 0) {
+    digitalWrite(26, HIGH);
+    digitalWrite(27, LOW);
+  } else {
+    digitalWrite(26, LOW);
+    digitalWrite(27, HIGH);
+    left = -left;
+  }
+  if (right >= 0) {
+    digitalWrite(12, HIGH);
+    digitalWrite(13, LOW);
+  } else {
+    digitalWrite(12, LOW);
+    digitalWrite(13, HIGH);
+    right = -right;
+  }
+  ledcWrite(0, left);
+  ledcWrite(1, right);
+}
+
+void loop() {
+  unsigned long now = millis();
+  if (now - lastTime < LOOP_TIME_MS) return;
+  lastTime = now;
+
+  readSensors();
+  float error = computePosition();
+  float absErr = fabs(error);
+
+  float KP, KI, KD;
+  if (absErr < 0.6) {
+    KP = KP1; KI = KI1; KD = KD1;
+  } else if (absErr < 1.6) {
+    KP = KP2; KI = KI2; KD = KD2;
+  } else {
+    KP = KP3; KI = KI3; KD = KD3;
+  }
+
+  int basePWM = BASE_SPEED_FAST;
+  if (absErr > ERROR_SLOW_THRESHOLD) {
+    basePWM = map(absErr * 100, ERROR_SLOW_THRESHOLD * 100, 400, BASE_SPEED_FAST, BASE_SPEED_SLOW);
+    basePWM = constrain(basePWM, BASE_SPEED_SLOW, BASE_SPEED_FAST);
+  }
+
+  float correction = computePID(error, KP, KI, KD);
+  int leftPWM = basePWM + correction;
+  int rightPWM = basePWM - correction;
+
+  setMotors(leftPWM, rightPWM);
+}
